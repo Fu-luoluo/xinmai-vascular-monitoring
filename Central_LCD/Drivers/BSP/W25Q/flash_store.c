@@ -6,10 +6,32 @@
 
 static uint8_t s_flash_ready;
 
+static uint8_t flash_probe_ok(void)
+{
+    return W25Q_IsSupportedJEDECID(W25Q_ReadJEDECID());
+}
+
 uint8_t FlashStore_Init(void)
 {
+    s_flash_ready = 0;
+    if(!flash_probe_ok()) {
+        if(W25Q_Init() != 0) {
+            return 1;
+        }
+    }
+    if(!flash_probe_ok()) {
+        return 1;
+    }
     s_flash_ready = 1;
     return 0;
+}
+
+uint8_t FlashStore_Ensure(void)
+{
+    if(s_flash_ready && flash_probe_ok()) {
+        return 0;
+    }
+    return FlashStore_Init();
 }
 
 uint8_t FlashStore_IsReady(void)
@@ -62,7 +84,9 @@ uint8_t FlashStore_Program(uint32_t abs_addr, const uint8_t *buf, uint32_t len)
         if(chunk > page_remain) {
             chunk = (uint16_t)page_remain;
         }
-        W25Q_PageProgram(abs_addr, buf + offset, chunk);
+        if(W25Q_PageProgram(abs_addr, buf + offset, chunk) != 0) {
+            return 1;
+        }
         WWDG_SetCounter(0);
         abs_addr += chunk;
         offset += chunk;
@@ -82,7 +106,9 @@ uint8_t FlashStore_EraseSector(uint32_t abs_addr)
         return 1;
     }
     WWDG_SetCounter(0);
-    W25Q_SectorErase4K(abs_addr);
+    if(W25Q_SectorErase4K(abs_addr) != 0) {
+        return 1;
+    }
     WWDG_SetCounter(0);
     return 0;
 }

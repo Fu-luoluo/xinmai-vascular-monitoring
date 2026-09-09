@@ -18,7 +18,7 @@ extern "C" {
 #define USER_PROFILE_HAND_MIN_CM        14U
 #define USER_PROFILE_HAND_MAX_CM        28U
 
-typedef struct
+typedef struct __attribute__((packed))
 {
     uint8_t  age;
     uint8_t  gender;

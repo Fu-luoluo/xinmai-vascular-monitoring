@@ -474,7 +474,7 @@
 
 #define LV_USE_ARC        0
 
-#define LV_USE_BAR        1
+#define LV_USE_BAR        0
 
 #define LV_USE_BTN        1
 
@@ -584,7 +584,7 @@
     #define LV_THEME_DEFAULT_GROW 0
 
     /*Default transition time in [ms]*/
-    #define LV_THEME_DEFAULT_TRANSITION_TIME 80
+    #define LV_THEME_DEFAULT_TRANSITION_TIME 0
 #endif /*LV_USE_THEME_DEFAULT*/
 
 /*A very simple theme that is a good starting point for a custom theme*/

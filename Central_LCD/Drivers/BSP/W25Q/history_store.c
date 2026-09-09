@@ -116,7 +116,7 @@ uint8_t HistoryStore_Init(void)
 
     s_ready = 0;
     s_ram_cache_count = 0;
-    if(!FlashStore_IsReady()) {
+    if(FlashStore_Ensure() != 0) {
         return 1;
     }
 
@@ -156,6 +156,14 @@ uint8_t HistoryStore_Init(void)
     return 0;
 }
 
+uint8_t HistoryStore_Ensure(void)
+{
+    if(s_ready && FlashStore_IsReady()) {
+        return 0;
+    }
+    return HistoryStore_Init();
+}
+
 uint8_t HistoryStore_IsReady(void)
 {
     return s_ready;
@@ -166,7 +174,7 @@ uint8_t HistoryStore_AppendSession(measureEndReason_t reason, const pwv_session_
     history_record_t rec;
     uint32_t slot;
 
-    if(!s_ready || snap == NULL) {
+    if(snap == NULL || HistoryStore_Ensure() != 0) {
         return 1;
     }
 

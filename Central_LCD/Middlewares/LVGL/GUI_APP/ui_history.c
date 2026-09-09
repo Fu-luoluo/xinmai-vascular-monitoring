@@ -242,6 +242,7 @@ void UI_History_Refresh(void)
         return;
     }
 
+    (void)HistoryStore_Ensure();
     if(!HistoryStore_IsReady()) {
         if(s_lbl_hist_empty) {
             lv_obj_clear_flag(s_lbl_hist_empty, LV_OBJ_FLAG_HIDDEN);

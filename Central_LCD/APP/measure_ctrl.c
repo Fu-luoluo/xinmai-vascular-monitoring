@@ -126,7 +126,7 @@ static void measure_complete(measureEndReason_t reason)
     AlarmMgr_Raise(ALARM_MEAS_DONE);
     AlarmMgr_OnSessionStop();
     CloudReport_SessionEnd(reason, &snap);
-    if(HistoryStore_IsReady()) {
+    if(HistoryStore_Ensure() == 0) {
         if(HistoryStore_AppendSession(reason, &snap) == 0) {
             UI_NotifyHistoryDirty();
         }

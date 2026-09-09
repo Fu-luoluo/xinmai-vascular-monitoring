@@ -23,6 +23,7 @@ typedef struct __attribute__((packed))
 } history_record_t;
 
 uint8_t HistoryStore_Init(void);
+uint8_t HistoryStore_Ensure(void);
 uint8_t HistoryStore_IsReady(void);
 uint8_t HistoryStore_AppendSession(measureEndReason_t reason, const pwv_session_t *snap);
 uint32_t HistoryStore_GetCount(void);

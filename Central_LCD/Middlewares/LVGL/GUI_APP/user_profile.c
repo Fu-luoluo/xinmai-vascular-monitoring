@@ -98,7 +98,7 @@ uint8_t UserProfile_Init(void)
     s_ready = 0U;
     user_profile_set_defaults();
 
-    if(!FlashStore_IsReady()) {
+    if(FlashStore_Ensure() != 0) {
         return 1U;
     }
 
@@ -151,10 +151,15 @@ uint8_t UserProfile_Set(const user_profile_t *in)
 uint8_t UserProfile_Save(void)
 {
     user_profile_blob_t blob;
+    user_profile_blob_t check;
 
-    if(!s_ready || !UserProfile_IsComplete()) {
+    if(!UserProfile_IsComplete()) {
         return 0U;
     }
+    if(FlashStore_Ensure() != 0) {
+        return 0U;
+    }
+    s_ready = 1U;
 
     memset(&blob, 0, sizeof(blob));
     blob.magic = USER_PROFILE_MAGIC;
@@ -166,6 +171,12 @@ uint8_t UserProfile_Save(void)
         return 0U;
     }
     if(FlashStore_Program(FLASH_PART_RSVD_BASE, (const uint8_t *)&blob, sizeof(blob)) != 0) {
+        return 0U;
+    }
+    memset(&check, 0, sizeof(check));
+    if(FlashStore_Read(FLASH_PART_RSVD_BASE, (uint8_t *)&check, sizeof(check)) != 0 ||
+       memcmp(&check, &blob, sizeof(blob)) != 0) {
+        PRINT("UserProfile save verify fail\r\n");
         return 0U;
     }
     return 1U;

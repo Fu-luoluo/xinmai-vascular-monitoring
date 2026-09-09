@@ -101,7 +101,18 @@ int main(void)
     }
 
     if(W25Q_Init() != 0) {
-        PRINT("W25Q64 selftest skip\r\n");
+        uint8_t n;
+
+        PRINT("W25Q64 probe retry\r\n");
+        for(n = 0; n < 4U; n++) {
+            mDelaymS(20);
+            if(W25Q_Init() == 0) {
+                break;
+            }
+        }
+    }
+    if(FlashStore_Ensure() != 0) {
+        PRINT("W25Q64 storage not ready\r\n");
     } else {
 #ifdef DEBUG
         if(W25Q_RunSelfTest() != 0) {
@@ -110,7 +121,6 @@ int main(void)
             PRINT("W25Q64 selftest pass\r\n");
         }
 #endif
-        (void)FlashStore_Init();
         OtaStore_Init();
         (void)UserProfile_Init();
         if(HistoryStore_Init() != 0) {

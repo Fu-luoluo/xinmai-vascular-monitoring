@@ -24,7 +24,10 @@ uint8_t W25Q_RunSelfTest(void)
     }
 
     W25Q_SectorErase4K(W25Q_SELFTEST_ADDR);
-    W25Q_PageProgram(W25Q_SELFTEST_ADDR, tx, W25Q_SELFTEST_LEN);
+    if(W25Q_PageProgram(W25Q_SELFTEST_ADDR, tx, W25Q_SELFTEST_LEN) != 0) {
+        PRINT("W25Q64 program timeout\r\n");
+        return 2;
+    }
     W25Q_Read(W25Q_SELFTEST_ADDR, rx, W25Q_SELFTEST_LEN);
 
     for(i = 0; i < W25Q_SELFTEST_LEN; i++) {

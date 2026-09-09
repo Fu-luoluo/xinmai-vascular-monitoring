@@ -13,8 +13,8 @@ uint8_t  W25Q_IsSupportedJEDECID(uint32_t id);
 uint32_t W25Q_GetJEDECID(void);
 uint32_t W25Q_ReadJEDECID(void);
 void     W25Q_Read(uint32_t addr, uint8_t *buf, uint32_t len);
-void     W25Q_PageProgram(uint32_t addr, const uint8_t *buf, uint16_t len);
-void     W25Q_SectorErase4K(uint32_t addr);
-void     W25Q_WaitBusy(void);
+uint8_t  W25Q_PageProgram(uint32_t addr, const uint8_t *buf, uint16_t len);
+uint8_t  W25Q_SectorErase4K(uint32_t addr);
+uint8_t  W25Q_WaitBusy(void);
 
 #endif /* W25QXX_H */

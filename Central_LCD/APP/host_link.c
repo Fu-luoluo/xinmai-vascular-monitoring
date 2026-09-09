@@ -41,7 +41,6 @@ static uint32_t        s_rx_line_count = 0U;
 static uint32_t        s_rx_wifi_list_count = 0U;
 static uint32_t        s_rx_wifi_status_count = 0U;
 
-static char            s_poll_line_buf[BSP_UART1_RX_LINE_MAX];
 static char            s_wifi_list_buf[HOST_LINK_WIFI_LIST_MAX];
 static uint8_t         s_wifi_list_pending = 0U;
 static char            s_wifi_status_buf[HOST_LINK_WIFI_STATUS_MAX];
@@ -525,17 +524,20 @@ void HostLink_SetEventFn(HostLinkEventFn fn)
 
 void HostLink_Poll(void)
 {
-    char    *line = s_poll_line_buf;
-    uint8_t  n = 0U;
-    char    *json;
+    const char *line;
+    uint8_t     n = 0U;
+    const char *json;
 
     host_link_poll_ota_binary();
     if(s_ota_active && BSP_UART1_IsOtaBinaryMode()) {
         return;
     }
 
-    while(n < HOST_LINK_MAX_POLL_PER_TICK &&
-          BSP_UART1_PollLine(line, sizeof(s_poll_line_buf))) {
+    while(n < HOST_LINK_MAX_POLL_PER_TICK) {
+        line = BSP_UART1_PollLinePtr();
+        if(line == NULL) {
+            break;
+        }
         n++;
         s_rx_line_count++;
         json = strchr(line, '{');

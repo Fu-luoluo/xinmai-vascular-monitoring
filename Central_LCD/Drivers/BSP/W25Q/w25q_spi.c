@@ -14,9 +14,12 @@ void W25Q_SPI_Init(void)
 {
     GPIOPinRemap(DISABLE, RB_PIN_SPI0);
 
-    /* Release hardware SPI0 SCS (PA12) and external flash CS (PA2) */
-    GPIOA_SetBits(W25Q_SPI0_SCS_UNUSED_PIN | W25Q_CS_PIN);
-    GPIOA_ModeCfg(W25Q_SPI0_SCS_UNUSED_PIN | W25Q_CS_PIN, GPIO_ModeOut_PP_5mA);
+    /*
+     * Flash CS is PA2 only.  PA12 is LCD CS after LCD_Init — do not reclaim it,
+     * or later W25Q retries will glitch the panel.
+     */
+    GPIOA_SetBits(W25Q_CS_PIN);
+    GPIOA_ModeCfg(W25Q_CS_PIN, GPIO_ModeOut_PP_5mA);
     GPIOA_ModeCfg(W25Q_SPI0_PINS_OUT, GPIO_ModeOut_PP_5mA);
     GPIOA_ModeCfg(W25Q_SPI0_MISO_PIN, GPIO_ModeIN_PU);
 

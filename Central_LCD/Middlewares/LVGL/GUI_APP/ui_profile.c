@@ -389,7 +389,7 @@ void UI_Profile_Open(void)
 {
     PowerMgr_OnUserActivity();
     UI_ReleaseSecondaryScreens();
-    /* 首页常驻，档案页与首页切换只 load，加快响应 */
+    /* 档案页与首页互斥，避免三滚轮和首页同时占满 LVGL 堆 */
     if(s_scr_profile == NULL) {
         ui_profile_build_screen();
     }
@@ -399,4 +399,5 @@ void UI_Profile_Open(void)
     }
     ui_profile_load_fields();
     lv_scr_load(s_scr_profile);
+    UI_UnloadHomeScreen();
 }

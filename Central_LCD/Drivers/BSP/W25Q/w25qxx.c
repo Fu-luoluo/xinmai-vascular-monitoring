@@ -10,6 +10,9 @@
 #define W25Q_CMD_SECTOR_ERASE   0x20u
 #define W25Q_CMD_READ_STATUS1   0x05u
 #define W25Q_CMD_JEDEC_ID       0x9Fu
+#define W25Q_CMD_RELEASE_PD     0xABu
+#define W25Q_ID_RETRY           8u
+#define W25Q_BUSY_SPIN_MAX      2000000UL
 
 #define W25Q_STATUS_WIP         0x01u
 
@@ -74,11 +77,17 @@ uint32_t W25Q_GetJEDECID(void)
     return s_w25q_jedec_id;
 }
 
-void W25Q_WaitBusy(void)
+uint8_t W25Q_WaitBusy(void)
 {
+    uint32_t spins = 0;
+
     while(w25q_read_status1() & W25Q_STATUS_WIP) {
         WWDG_SetCounter(0);
+        if(++spins > W25Q_BUSY_SPIN_MAX) {
+            return 1;
+        }
     }
+    return 0;
 }
 
 uint32_t W25Q_ReadJEDECID(void)
@@ -99,23 +108,28 @@ uint32_t W25Q_ReadJEDECID(void)
 
 uint8_t W25Q_Init(void)
 {
-    uint32_t id;
+    uint8_t  i;
+    uint32_t id = 0;
 
     W25Q_SPI_Init();
-    id = W25Q_ReadJEDECID();
-    if(!W25Q_IsSupportedJEDECID(id)) {
-        PRINT("W25Q64 init fail, ID=0x%06lX\r\n", (unsigned long)id);
-        return 1;
+    W25Q_CS_High();
+    /* Cold power-up / CS glitch can leave the die in deep power-down. */
+    w25q_cmd_only(W25Q_CMD_RELEASE_PD);
+    mDelaymS(2);
+
+    for(i = 0; i < W25Q_ID_RETRY; i++) {
+        id = W25Q_ReadJEDECID();
+        if(W25Q_IsSupportedJEDECID(id)) {
+            SPI0_CLKCfg(8);
+            PRINT("W25Q64 init OK, ID=0x%06lX\r\n", (unsigned long)id);
+            return 0;
+        }
+        w25q_cmd_only(W25Q_CMD_RELEASE_PD);
+        mDelaymS(5);
     }
 
-    /*
-     * ESMT 0x1C3017 parts on the current board intermittently fail page
-     * verification at the faster divider.  Keep the conservative divider
-     * used during probe so OTA writes remain reliable.
-     */
-    SPI0_CLKCfg(8);
-    PRINT("W25Q64 init OK, ID=0x%06lX\r\n", (unsigned long)id);
-    return 0;
+    PRINT("W25Q64 init fail, ID=0x%06lX\r\n", (unsigned long)id);
+    return 1;
 }
 
 void W25Q_Read(uint32_t addr, uint8_t *buf, uint32_t len)
@@ -137,12 +151,12 @@ void W25Q_Read(uint32_t addr, uint8_t *buf, uint32_t len)
     W25Q_CS_High();
 }
 
-void W25Q_PageProgram(uint32_t addr, const uint8_t *buf, uint16_t len)
+uint8_t W25Q_PageProgram(uint32_t addr, const uint8_t *buf, uint16_t len)
 {
     uint8_t cmd[4];
 
     if(buf == NULL || len == 0 || len > W25Q_PAGE_SIZE) {
-        return;
+        return 1;
     }
 
     cmd[0] = W25Q_CMD_PAGE_PROGRAM;
@@ -155,10 +169,10 @@ void W25Q_PageProgram(uint32_t addr, const uint8_t *buf, uint16_t len)
     W25Q_SPI_Transmit(cmd, sizeof(cmd));
     W25Q_SPI_Transmit(buf, len);
     W25Q_CS_High();
-    W25Q_WaitBusy();
+    return W25Q_WaitBusy();
 }
 
-void W25Q_SectorErase4K(uint32_t addr)
+uint8_t W25Q_SectorErase4K(uint32_t addr)
 {
     uint8_t cmd[4];
 
@@ -171,5 +185,5 @@ void W25Q_SectorErase4K(uint32_t addr)
     W25Q_CS_Low();
     W25Q_SPI_Transmit(cmd, sizeof(cmd));
     W25Q_CS_High();
-    W25Q_WaitBusy();
+    return W25Q_WaitBusy();
 }

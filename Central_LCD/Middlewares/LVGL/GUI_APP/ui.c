@@ -38,6 +38,7 @@
 #define UI_HOME_TILE_W          224
 #define UI_HOME_TILE_H          112
 #define UI_HOME_TILE_GAP        12
+#define UI_VITALS_REFRESH_MS    150U
 
 typedef struct {
     uint8_t  w_hr;
@@ -109,6 +110,7 @@ static char           s_quality_buf[32];
 static char           s_result_pwv_buf[28];
 static char           s_result_ref_buf[40];
 static lv_obj_t *     s_result_overlay;
+static uint32_t       s_vitals_last_ms;
 
 static void ui_hide_result_overlay(void);
 static void ui_show_result_overlay(void);
@@ -535,7 +537,7 @@ static void ui_show_page(ui_page_t page)
         ui_refresh_home();
         return;
     case UI_PAGE_MONITOR:
-        /* 首页常驻：只互斥释放其它副屏，避免每次重建导致切页顿挫 */
+        /* 先建监测页并切屏，再卸首页，避免两屏同时占满 LVGL 堆 */
         UI_WiFi_Release();
         UI_Profile_Destroy();
         UI_History_Destroy();
@@ -547,6 +549,7 @@ static void ui_show_page(ui_page_t page)
         target = s_scr_monitor;
         s_active_nav = &s_monitor_nav;
         s_ui.dirty = 1U;
+        s_vitals_last_ms = 0U;
         break;
     case UI_PAGE_HISTORY:
         UI_WiFi_Release();
@@ -577,11 +580,13 @@ static void ui_show_page(ui_page_t page)
         lv_obj_invalidate(target);
     }
     if(s_page == UI_PAGE_MONITOR) {
+        ui_destroy_home_screen();
         UI_Refresh();
         if(Measure_IsResultHold()) {
             ui_show_result_overlay();
         }
     } else if(s_page == UI_PAGE_HISTORY) {
+        ui_destroy_home_screen();
         lv_async_call(ui_history_refresh_async, NULL);
     }
 }
@@ -754,15 +759,20 @@ static void ui_update_measure_btn(void)
         lv_label_set_text(s_lbl_measure, UI_STR_MEASURE_START);
         lv_obj_set_style_bg_color(s_btn_measure, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_color(s_lbl_measure, lv_color_hex(0x1565C0), 0);
-        if(Measure_IsResultHold()) {
-            canStart = Measure_CanStart();
-        } else {
-            canStart = Measure_CanStart() && Measure_PreflightOk();
-        }
-        if(canStart) {
+        /* 双勾已亮时保持可点，预检失败只靠红字提示，避免看起来像卡死 */
+        if(s_ui.w_link && s_ui.f_link) {
             lv_obj_clear_state(s_btn_measure, LV_STATE_DISABLED);
         } else {
-            lv_obj_add_state(s_btn_measure, LV_STATE_DISABLED);
+            if(Measure_IsResultHold()) {
+                canStart = Measure_CanStart();
+            } else {
+                canStart = Measure_CanStart() && Measure_PreflightOk();
+            }
+            if(canStart) {
+                lv_obj_clear_state(s_btn_measure, LV_STATE_DISABLED);
+            } else {
+                lv_obj_add_state(s_btn_measure, LV_STATE_DISABLED);
+            }
         }
     }
     ui_update_status_label();
@@ -774,7 +784,7 @@ static void ui_on_measure_toggle(lv_event_t * e)
 {
     (void)e;
     PowerMgr_OnUserActivity();
-    lv_async_call(ui_measure_toggle_async, NULL);
+    ui_measure_toggle_async(NULL);
 }
 
 static void ui_measure_toggle_async(void * user_data)
@@ -1450,7 +1460,7 @@ void UI_LoadHomeScreen(void)
 
 void UI_UnloadHomeScreen(void)
 {
-    /* 仅在首页已非活动屏时删除；活动时由 ui_show_page 经 blank 过渡删除 */
+    /* 仅在首页已非活动屏时删除；活动时由 ui_show_page 先切监测再删除 */
     if(s_scr_home == NULL || lv_scr_act() == s_scr_home) {
         return;
     }
@@ -1491,6 +1501,7 @@ void UI_NotifyHistoryDirty(void)
 void UI_NotifyMeasureState(void)
 {
     s_ui.dirty = 1U;
+    s_vitals_last_ms = 0U;
     if(Measure_IsResultHold()) {
         if(s_page != UI_PAGE_MONITOR) {
             ui_show_page(UI_PAGE_MONITOR);
@@ -1614,8 +1625,8 @@ uint8_t UI_PreflightOk(void)
     if(!s_ui.w_link || !s_ui.f_link) {
         return 0U;
     }
-    /* 测量前尚无 paced vitals；两路已连接即可 Start，逐拍门控在 PWV 层 */
-    if(!s_ui.w_valid) {
+    /* 空样本（首页等连接时外设可能先推 0）不当作失败，允许开始 */
+    if(!s_ui.w_valid || (s_ui.w_hr == 0U && s_ui.w_spo2 == 0U)) {
         return 1U;
     }
     if(s_ui.w_spo2 < PWV_WRIST_SPO2_MIN) {
@@ -1624,7 +1635,8 @@ uint8_t UI_PreflightOk(void)
     if(s_ui.w_hr < PWV_WRIST_HR_PRODUCT_MIN || s_ui.w_hr > PWV_WRIST_HR_PRODUCT_MAX) {
         return 0U;
     }
-    if(s_ui.f_valid && s_ui.f_spo2 < PWV_FINGER_SPO2_MIN) {
+    if(s_ui.f_valid && !(s_ui.f_hr == 0U && s_ui.f_spo2 == 0U) &&
+       s_ui.f_spo2 < PWV_FINGER_SPO2_MIN) {
         return 0U;
     }
     return 1U;
@@ -1647,13 +1659,14 @@ const char * UI_PreflightHint(void)
     if(!s_ui.f_link) {
         return UI_STR_PREFLIGHT_FINGER_LINK;
     }
-    if(s_ui.w_valid && s_ui.w_spo2 < PWV_WRIST_SPO2_MIN) {
+    if(s_ui.w_valid && !(s_ui.w_hr == 0U && s_ui.w_spo2 == 0U) &&
+       s_ui.w_spo2 < PWV_WRIST_SPO2_MIN) {
         snprintf(s_preflight_buf, sizeof(s_preflight_buf),
                  UI_STR_PREFLIGHT_SPO2_FMT,
                  (unsigned)s_ui.w_spo2, (unsigned)PWV_WRIST_SPO2_MIN);
         return s_preflight_buf;
     }
-    if(s_ui.w_valid &&
+    if(s_ui.w_valid && !(s_ui.w_hr == 0U && s_ui.w_spo2 == 0U) &&
        (s_ui.w_hr < PWV_WRIST_HR_PRODUCT_MIN || s_ui.w_hr > PWV_WRIST_HR_PRODUCT_MAX)) {
         snprintf(s_preflight_buf, sizeof(s_preflight_buf),
                  UI_STR_PREFLIGHT_HR_FMT,
@@ -1662,7 +1675,8 @@ const char * UI_PreflightHint(void)
                  (unsigned)PWV_WRIST_HR_PRODUCT_MAX);
         return s_preflight_buf;
     }
-    if(s_ui.f_valid && s_ui.f_spo2 < PWV_FINGER_SPO2_MIN) {
+    if(s_ui.f_valid && !(s_ui.f_hr == 0U && s_ui.f_spo2 == 0U) &&
+       s_ui.f_spo2 < PWV_FINGER_SPO2_MIN) {
         snprintf(s_preflight_buf, sizeof(s_preflight_buf),
                  UI_STR_PREFLIGHT_FINGER_FMT,
                  (unsigned)s_ui.f_spo2, (unsigned)PWV_FINGER_SPO2_MIN);
@@ -1696,6 +1710,7 @@ void UI_Init(void)
 void UI_Refresh(void)
 {
     char buf[16];
+    uint32_t now;
 
     if(s_page == UI_PAGE_HOME) {
         if(s_ui.dirty) {
@@ -1708,7 +1723,14 @@ void UI_Refresh(void)
     if(s_page != UI_PAGE_MONITOR || !s_ui.dirty || s_scr_monitor == NULL) {
         return;
     }
+
+    now = lv_tick_get();
+    if(s_vitals_last_ms != 0U &&
+       (now - s_vitals_last_ms) < UI_VITALS_REFRESH_MS) {
+        return;
+    }
     s_ui.dirty = 0U;
+    s_vitals_last_ms = now;
 
     ui_refresh_vitals_merged();
     ui_update_all_link_marks();
@@ -1806,5 +1828,6 @@ void UI_SetLink(uint8_t wrist_ok, uint8_t finger_ok,
     s_ui.dirty = 1U;
     if(s_scr_monitor != NULL) {
         ui_update_all_link_marks();
+        ui_update_measure_btn();
     }
 }

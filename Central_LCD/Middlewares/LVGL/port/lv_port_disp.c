@@ -7,8 +7,8 @@
 #include "lcd.h"
 #include "SPI.h"
 
-/* 480*20*2≈19.2KB：减少全屏刷新 SPI 次数，用剩余 RAM 换手感 */
-#define LV_DISP_BUF_LINES   20
+/* 480*10*2≈9.6KB：压缩行缓冲，把静态 RAM 还给 BLE/TMOS 栈 */
+#define LV_DISP_BUF_LINES   10
 
 static void disp_init(void);
 static void disp_flush(lv_disp_drv_t * disp_drv, const lv_area_t * area, lv_color_t * color_p);
