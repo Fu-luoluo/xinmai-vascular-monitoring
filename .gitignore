@@ -1,0 +1,25 @@
+# ============ MounRiver / WCH CH58x 编译产物 ============
+obj/
+*.o
+*.d
+*.elf
+*.map
+*.lst
+
+# ============ IDE / 本机状态（含本机绝对路径，勿入库） ============
+.mrs/
+.settings/
+*.snapshot
+preferredEncoding.json
+
+# ===== 大体积字体源文件：只保留已生成的 .c 字库 =====
+# GUI_APP/tools 的中文字体源、LVGL 自带的演示字体均无代码引用
+*.ttf
+*.otf
+*.zip
+
+# ============ 系统 / 编辑器垃圾 ============
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
