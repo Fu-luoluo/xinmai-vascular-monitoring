@@ -28,26 +28,30 @@
  * CONSTANTS
  */
 #define DEFAULT_MAX_SCAN_RES                16
-#define DEFAULT_SCAN_DURATION               1600
+#define DEFAULT_SCAN_DURATION               800
 #define DEFAULT_MIN_CONNECTION_INTERVAL     24
-#define DEFAULT_MAX_CONNECTION_INTERVAL     120
-#define DEFAULT_CONNECTION_TIMEOUT          800
+#define DEFAULT_MAX_CONNECTION_INTERVAL     24
+#define DEFAULT_CONNECTION_TIMEOUT          600
 #define DEFAULT_DISCOVERY_START_DELAY       32U
 #define DEFAULT_DISCOVERY_MODE              DEVDISC_MODE_ALL
 #define DEFAULT_DISCOVERY_ACTIVE_SCAN       TRUE
 #define DEFAULT_DISCOVERY_WHITE_LIST        FALSE
-#define DEFAULT_LINK_HIGH_DUTY_CYCLE        FALSE
+#define DEFAULT_LINK_HIGH_DUTY_CYCLE        TRUE
 #define DEFAULT_LINK_WHITE_LIST             FALSE
 #define DEFAULT_UPDATE_MIN_CONN_INTERVAL    24
-#define DEFAULT_UPDATE_MAX_CONN_INTERVAL    120
+#define DEFAULT_UPDATE_MAX_CONN_INTERVAL    24
 #define DEFAULT_UPDATE_SLAVE_LATENCY        0
-#define DEFAULT_UPDATE_CONN_TIMEOUT         800
+#define DEFAULT_UPDATE_CONN_TIMEOUT         600
+#define DEFAULT_CONN_SCAN_INT               16
+#define DEFAULT_CONN_SCAN_WIND              16
+#define DEFAULT_CONN_CE_LEN_MIN             4
+#define DEFAULT_CONN_CE_LEN_MAX             12
 #define DEFAULT_PASSCODE                    0
 #define DEFAULT_PAIRING_MODE                GAPBOND_PAIRING_MODE_WAIT_FOR_REQ
 #define DEFAULT_MITM_MODE                   FALSE
 #define DEFAULT_BONDING_MODE                FALSE
 #define DEFAULT_IO_CAPABILITIES             GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT
-#define DEFAULT_PARAM_UPDATE_DELAY          2400
+#define DEFAULT_PARAM_UPDATE_DELAY          800
 #define CENTRAL_RECONNECT_DELAY             1600
 #define CENTRAL_RECONNECT_BACKOFF_MAX       9600
 #define ESTABLISH_LINK_TIMEOUT              4800
@@ -137,6 +141,7 @@ static uint8_t           s_prevWLink = 0U;
 static uint8_t           s_prevFLink = 0U;
 /* 允许发起“第二条”ACL：首节点 ready 后延迟置位，避免 0x3e 互踢 */
 static uint8_t           s_allowSecondLink = 0U;
+static uint8_t           s_paramFixPending = 0U;
 static gapDevRec_t       centralDevList[DEFAULT_MAX_SCAN_RES];
 
 /*********************************************************************
@@ -162,6 +167,9 @@ static uint8_t  centralBothReady(void);
 static void     centralTryConnectNext(void);
 static void     centralStartScan(void);
 static void     centralScheduleReconnect(void);
+static void     centralAbortEstablish(void);
+static void     centralRestoreConnTimeout(uint16_t connHandle);
+static void     centralFlushParamFix(void);
 static void     centralResetNodeRuntime(centralNode_t *n);
 static void     centralOnNodeReady(uint8_t nodeIdx);
 static void     centralScheduleDiscovery(uint8_t nodeIdx, uint16_t delayTicks);
@@ -209,6 +217,15 @@ void Central_Init()
     GAP_SetParamValue(TGAP_CONN_EST_INT_MIN, DEFAULT_MIN_CONNECTION_INTERVAL);
     GAP_SetParamValue(TGAP_CONN_EST_INT_MAX, DEFAULT_MAX_CONNECTION_INTERVAL);
     GAP_SetParamValue(TGAP_CONN_EST_SUPERV_TIMEOUT, DEFAULT_CONNECTION_TIMEOUT);
+    GAP_SetParamValue(TGAP_CONN_EST_LATENCY, 0);
+    GAP_SetParamValue(TGAP_CONN_EST_SCAN_INT, DEFAULT_CONN_SCAN_INT);
+    GAP_SetParamValue(TGAP_CONN_EST_SCAN_WIND, DEFAULT_CONN_SCAN_WIND);
+    GAP_SetParamValue(TGAP_CONN_EST_HIGH_SCAN_INT, DEFAULT_CONN_SCAN_INT);
+    GAP_SetParamValue(TGAP_CONN_EST_HIGH_SCAN_WIND, DEFAULT_CONN_SCAN_WIND);
+    GAP_SetParamValue(TGAP_CONN_EST_MIN_CE_LEN, DEFAULT_CONN_CE_LEN_MIN);
+    GAP_SetParamValue(TGAP_CONN_EST_MAX_CE_LEN, DEFAULT_CONN_CE_LEN_MAX);
+    /* 外设固件会在连上约 4s 后把监督超时改成 1s；主机拒绝该请求 */
+    GAP_SetParamValue(TGAP_REJECT_CONN_PARAMS, TRUE);
 
     {
         uint32_t passkey = DEFAULT_PASSCODE;
@@ -251,32 +268,10 @@ uint16_t Central_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if(events & ESTABLISH_LINK_TIMEOUT_EVT)
     {
-        if(centralConnectingIdx >= 0 && centralConnectingIdx < NODE_COUNT)
-        {
-            PRINT("%s connect timeout, rescan\n",
-                  centralNodes[centralConnectingIdx].name);
-            centralNodes[centralConnectingIdx].connecting = 0;
-            centralClearNodePresence((uint8_t)centralConnectingIdx);
-            if(centralReconnectFails < 12U)
-            {
-                centralReconnectFails++;
-            }
-        }
-        centralConnectingIdx = -1;
+        PRINT("Establish timeout, abort initiating\n");
+        centralAbortEstablish();
         centralUiUpdateLink();
-        /* 已有一路时走退避重连，避免门闩关闭导致永久不连第二路 */
-        if(centralNodes[NODE_FINGER].connected || centralNodes[NODE_WRIST].connected)
-        {
-            centralScheduleReconnect();
-        }
-        else if(centralBothAddrDistinct())
-        {
-            centralTryConnectNext();
-        }
-        else
-        {
-            centralScheduleReconnect();
-        }
+        centralScheduleReconnect();
         return (events ^ ESTABLISH_LINK_TIMEOUT_EVT);
     }
 
@@ -306,8 +301,12 @@ uint16_t Central_ProcessEvent(uint8_t task_id, uint16_t events)
     {
         if(centralNodes[NODE_FINGER].connected || centralNodes[NODE_WRIST].connected)
         {
-            /* 已有一路时，重连另一路也要带门闩，避免连发 Establish */
             s_allowSecondLink = 1U;
+            centralTryConnectNext();
+        }
+        else if(centralBothAddrDistinct())
+        {
+            s_allowSecondLink = 0U;
             centralTryConnectNext();
         }
         else
@@ -491,6 +490,67 @@ static void centralUpdateLinkParams(uint8_t nodeIdx)
                        DEFAULT_UPDATE_CONN_TIMEOUT);
 }
 
+static void centralAbortEstablish(void)
+{
+    tmos_stop_task(centralTaskId, ESTABLISH_LINK_TIMEOUT_EVT);
+    (void)GAPRole_TerminateLink(GAP_CONNHANDLE_INIT);
+    if(centralConnectingIdx >= 0 && centralConnectingIdx < NODE_COUNT)
+    {
+        centralNodes[centralConnectingIdx].connecting = 0;
+        centralClearNodePresence((uint8_t)centralConnectingIdx);
+        if(centralReconnectFails < 12U)
+        {
+            centralReconnectFails++;
+        }
+    }
+    centralConnectingIdx = -1;
+}
+
+static void centralRestoreConnTimeout(uint16_t connHandle)
+{
+    if(connHandle == GAP_CONNHANDLE_INIT)
+    {
+        return;
+    }
+    if(centralConnectInProgress() || centralProcedureInProgress)
+    {
+        s_paramFixPending = 1U;
+        return;
+    }
+    GAPRole_UpdateLink(connHandle,
+                       DEFAULT_UPDATE_MIN_CONN_INTERVAL,
+                       DEFAULT_UPDATE_MAX_CONN_INTERVAL,
+                       DEFAULT_UPDATE_SLAVE_LATENCY,
+                       DEFAULT_UPDATE_CONN_TIMEOUT);
+}
+
+static void centralFlushParamFix(void)
+{
+    uint8_t i;
+
+    if(!s_paramFixPending)
+    {
+        return;
+    }
+    if(centralConnectInProgress() || centralProcedureInProgress)
+    {
+        return;
+    }
+    s_paramFixPending = 0U;
+    for(i = 0U; i < NODE_COUNT; i++)
+    {
+        if(centralNodes[i].connected &&
+           centralNodes[i].connHandle != GAP_CONNHANDLE_INIT)
+        {
+            GAPRole_UpdateLink(centralNodes[i].connHandle,
+                               DEFAULT_UPDATE_MIN_CONN_INTERVAL,
+                               DEFAULT_UPDATE_MAX_CONN_INTERVAL,
+                               DEFAULT_UPDATE_SLAVE_LATENCY,
+                               DEFAULT_UPDATE_CONN_TIMEOUT);
+        }
+    }
+}
+
 static void centralScheduleReconnect(void)
 {
     uint16_t delay = CENTRAL_RECONNECT_DELAY;
@@ -606,10 +666,23 @@ static void centralTryConnectNext(void)
             (void)GAPRole_CentralCancelDiscovery();
             centralConnectingIdx = (int8_t)idx;
             n->connecting = 1;
-            GAPRole_CentralEstablishLink(DEFAULT_LINK_HIGH_DUTY_CYCLE,
-                                         DEFAULT_LINK_WHITE_LIST,
-                                         n->addrType,
-                                         n->addr);
+            {
+                bStatus_t st;
+
+                st = GAPRole_CentralEstablishLink(DEFAULT_LINK_HIGH_DUTY_CYCLE,
+                                                  DEFAULT_LINK_WHITE_LIST,
+                                                  n->addrType,
+                                                  n->addr);
+                if(st != SUCCESS)
+                {
+                    PRINT("Establish %s fail st=%02X\n", n->name, st);
+                    n->connecting = 0;
+                    centralConnectingIdx = -1;
+                    centralUiUpdateLink();
+                    centralScheduleReconnect();
+                    return;
+                }
+            }
             tmos_start_task(centralTaskId, ESTABLISH_LINK_TIMEOUT_EVT, ESTABLISH_LINK_TIMEOUT);
             centralUiUpdateLink();
             PRINT("Connecting %s...\n", n->name);
@@ -703,6 +776,7 @@ static void centralOnProcedureIdle(void)
         return;
     }
     centralKickDiscWork();
+    centralFlushParamFix();
     centralTryConnectNext();
     if(centralMeasureWanted)
     {
@@ -1710,7 +1784,14 @@ static void centralEventCB(gapRoleEvent_t *pEvent)
     switch(pEvent->gap.opcode)
     {
         case GAP_DEVICE_INIT_DONE_EVENT:
-            centralStartScan();
+            if(centralBothAddrDistinct())
+            {
+                centralTryConnectNext();
+            }
+            else
+            {
+                centralStartScan();
+            }
             break;
 
         case GAP_DEVICE_INFO_EVENT:
@@ -1759,7 +1840,7 @@ static void centralEventCB(gapRoleEvent_t *pEvent)
                         centralConnectingIdx = -1;
                         centralUiUpdateLink();
                         GAPRole_TerminateLink(lc->connectionHandle);
-                        centralTryConnectNext();
+                        centralScheduleReconnect();
                         break;
                     }
                     nodeIdx = pendingIdx;
@@ -1781,6 +1862,7 @@ static void centralEventCB(gapRoleEvent_t *pEvent)
                 n->connHandle = lc->connectionHandle;
                 centralConnectingIdx = -1;
                 centralActiveNode = nodeIdx;
+                centralReconnectFails = 0U;
 
                 PRINT("%s connected h=%02X\n", n->name, n->connHandle);
                 centralUiUpdateLink();
@@ -1807,18 +1889,8 @@ static void centralEventCB(gapRoleEvent_t *pEvent)
                         centralReconnectFails++;
                     }
                 }
-                if(centralNodes[NODE_WRIST].connected || centralNodes[NODE_FINGER].connected)
-                {
-                    centralScheduleReconnect();
-                }
-                else if(centralBothAddrDistinct())
-                {
-                    centralTryConnectNext();
-                }
-                else
-                {
-                    centralScheduleReconnect();
-                }
+                (void)GAPRole_TerminateLink(GAP_CONNHANDLE_INIT);
+                centralScheduleReconnect();
             }
         }
         break;
@@ -1858,6 +1930,24 @@ static void centralEventCB(gapRoleEvent_t *pEvent)
                 centralPacedStartDone = FALSE;
                 centralOnProcedureIdle();
                 centralScheduleReconnect();
+            }
+        }
+        break;
+
+        case GAP_LINK_PARAM_UPDATE_EVENT:
+        {
+            gapLinkUpdateEvent_t *up = (gapLinkUpdateEvent_t *)pEvent;
+
+            PRINT("Param upd h=%02X int=%u to=%u st=%u\n",
+                  up->connectionHandle,
+                  (unsigned)up->connInterval,
+                  (unsigned)up->connTimeout,
+                  (unsigned)up->status);
+            if(up->status == SUCCESS &&
+               up->connTimeout > 0U &&
+               up->connTimeout < 300U)
+            {
+                centralRestoreConnTimeout(up->connectionHandle);
             }
         }
         break;

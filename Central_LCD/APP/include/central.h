@@ -3,7 +3,7 @@
  * Author             : WCH
  * Version            : V1.0
  * Date               : 2018/11/12
- * Description        : BLE Central ??????????Finger + Wrist??????? MAC ??ÛF??
+ * Description        : BLE Central ??????????Finger + Wrist??????? MAC ??ï¿½F??
  *********************************************************************************
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * Attention: This software (modified or not) and binary are used for 
@@ -28,8 +28,8 @@ extern "C" {
 #define ESTABLISH_LINK_TIMEOUT_EVT    0x0200
 #define START_RECONNECT_EVT           0x0400
 #define START_SECOND_LINK_EVT         0x0800
-/* First node GATT ready, then wait ~1.25s before second ACL (mitigate 0x3e) */
-#define CENTRAL_SECOND_LINK_DELAY     2000
+/* ?? ready ?? 1s ?????????? 4s ????????? */
+#define CENTRAL_SECOND_LINK_DELAY     1600
 
 /*********************************************************************
  * FUNCTIONS

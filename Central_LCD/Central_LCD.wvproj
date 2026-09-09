@@ -173,7 +173,7 @@
 						"defined_symbols": [
 							"DEBUG=0",
 							"CLK_OSC32K=0",
-							"HAL_SLEEP=1",
+							"HAL_SLEEP=0",
 							"BLE_BUFF_MAX_LEN=80",
 							"LV_CONF_INCLUDE_SIMPLE",
 							"LV_LVGL_H_INCLUDE_SIMPLE"
