@@ -68,8 +68,6 @@ static lv_obj_t *     s_btn_pass_connect;
 static lv_obj_t *     s_btn_pass_cancel;
 static lv_obj_t *     s_kb_target;
 static lv_obj_t *     s_lbl_wifi_block;
-static lv_obj_t *     s_lbl_wifi_dbg;
-static lv_obj_t *     s_lbl_wifi_dbg2;
 
 static ui_wifi_ap_t   s_aps[UI_WIFI_AP_MAX];
 static uint8_t        s_ap_count = 0;
@@ -92,17 +90,13 @@ static lv_obj_t *     s_return_scr = NULL;
 static uint32_t       s_last_scan_tick = 0U;
 static uint8_t        s_wifi_scan_active = 0U;
 static uint8_t        s_list_apply_pending = 0U;
-static uint32_t       s_dbg_last_b = 0U;
-static uint32_t       s_dbg_last_l = 0U;
-static uint32_t       s_dbg_last_w = 0U;
-static uint32_t       s_dbg_last_s = 0U;
-static uint8_t        s_dbg_last_ap = 0U;
-static char           s_last_wifi_head[56];
 static int16_t        s_last_wifi_count = -1;
 static uint8_t        s_last_wifi_parsed = 0U;
 
 static uint8_t        s_wifi_ui_ready = 0U;
 static uint8_t        s_pass_panel_ready = 0U;
+static uint8_t        s_wifi_boot_pending = 0U;
+static uint32_t       s_wifi_open_tick = 0U;
 
 static ui_wifi_conn_phase_t s_wifi_conn_phase = UI_WIFI_CONN_IDLE;
 static uint32_t             s_last_status_poll_tick = 0U;
@@ -137,11 +131,11 @@ static void ui_wifi_on_manual(lv_event_t * e);
 static void ui_wifi_on_pass_connect(lv_event_t * e);
 static void ui_wifi_on_pass_cancel(lv_event_t * e);
 static void ui_wifi_on_ta_focus(lv_event_t * e);
-static void ui_wifi_update_debug_label(void);
 static void ui_wifi_go_home_async(void * user_data);
 static void ui_wifi_pass_cancel_async(void * user_data);
 static void ui_wifi_pass_open_async(void * user_data);
 static void ui_wifi_destroy_ap_buttons(void);
+static void ui_wifi_deferred_boot_async(void * user_data);
 static uint8_t ui_wifi_aps_changed(const ui_wifi_ap_t *new_aps, uint8_t new_count);
 
 static uint8_t ui_wifi_aps_changed(const ui_wifi_ap_t *new_aps, uint8_t new_count)
@@ -158,38 +152,6 @@ static uint8_t ui_wifi_aps_changed(const ui_wifi_ap_t *new_aps, uint8_t new_coun
         }
     }
     return 0U;
-}
-
-static void ui_wifi_update_debug_label(void)
-{
-    char     buf[64];
-    uint32_t b;
-    uint32_t l;
-    uint32_t w;
-    uint32_t s;
-    uint32_t d;
-
-    if(s_lbl_wifi_dbg == NULL || s_wifi_view != UI_WIFI_VIEW_LIST) {
-        return;
-    }
-    b = BSP_UART1_GetRxByteCount();
-    l = HostLink_GetRxLineCount();
-    w = HostLink_GetWifiListCount();
-    s = HostLink_GetWifiStatusCount();
-    d = HostLink_GetRxDropCount();
-    if(b == s_dbg_last_b && l == s_dbg_last_l && w == s_dbg_last_w &&
-       s == s_dbg_last_s && s_ap_count == s_dbg_last_ap) {
-        return;
-    }
-    s_dbg_last_b = b;
-    s_dbg_last_l = l;
-    s_dbg_last_w = w;
-    s_dbg_last_s = s;
-    s_dbg_last_ap = s_ap_count;
-    snprintf(buf, sizeof(buf), "B:%lu L:%lu W:%lu S:%lu D:%lu AP:%u",
-             (unsigned long)b, (unsigned long)l, (unsigned long)w,
-             (unsigned long)s, (unsigned long)d, (unsigned)s_ap_count);
-    lv_label_set_text(s_lbl_wifi_dbg, buf);
 }
 
 static void ui_wifi_request_scan(uint8_t force)
@@ -281,7 +243,9 @@ static void ui_wifi_parse_status(const char *json)
         s_wifi_connected = 1U;
         strncpy(s_wifi_ssid, ssid_buf, UI_WIFI_SSID_MAX);
         s_wifi_ssid[UI_WIFI_SSID_MAX] = '\0';
-        UI_RefreshHome();
+        if(!s_wifi_active) {
+            UI_RefreshHome();
+        }
     } else if(strcmp(state, "scanning") == 0) {
         (void)state;
     } else if(strcmp(state, "connecting") == 0) {
@@ -312,7 +276,9 @@ static void ui_wifi_parse_status(const char *json)
         s_wifi_conn_start_tick = 0U;
         s_wifi_connected = 0U;
         s_wifi_ssid[0] = '\0';
-        UI_RefreshHome();
+        if(!s_wifi_active) {
+            UI_RefreshHome();
+        }
     } else if(strcmp(state, "no_config") == 0) {
         if(s_wifi_scan_active || s_wifi_conn_phase == UI_WIFI_CONN_PENDING) {
             return;
@@ -341,20 +307,10 @@ static void ui_wifi_parse_list(const char *json)
     uint8_t      i = 0U;
     long         expect_count = -1;
     size_t       n;
-    uint8_t      j = 0U;
 
     if(json == NULL) {
         return;
     }
-    for(j = 0U; j < (sizeof(s_last_wifi_head) - 1U) && json[j] != '\0'; j++) {
-        char c = json[j];
-        if(c < 32 || c > 126) {
-            s_last_wifi_head[j] = '.';
-        } else {
-            s_last_wifi_head[j] = c;
-        }
-    }
-    s_last_wifi_head[j] = '\0';
 
     p = strstr(json, "\"aps\":[");
     if(p == NULL) {
@@ -424,6 +380,7 @@ static void ui_wifi_parse_list(const char *json)
     memcpy(s_aps, tmp, (size_t)i * sizeof(ui_wifi_ap_t));
     s_ap_count = i;
     s_list_apply_pending = 1U;
+    WWDG_SetCounter(0);
 }
 
 static void ui_wifi_destroy_ap_buttons(void)
@@ -460,12 +417,14 @@ static void ui_wifi_refresh_list(void)
 {
     char    buf[48];
     uint8_t i;
+    uint8_t created = 0U;
     lv_obj_t *btn;
     lv_obj_t *lbl;
 
     if(s_list_wifi == NULL) {
         return;
     }
+    WWDG_SetCounter(0);
     if(s_ap_count <= 5U) {
         lv_obj_clear_flag(s_list_wifi, LV_OBJ_FLAG_SCROLLABLE);
     } else {
@@ -474,6 +433,10 @@ static void ui_wifi_refresh_list(void)
     for(i = 0U; i < UI_WIFI_AP_MAX; i++) {
         if(i < s_ap_count) {
             if(s_ap_btns[i] == NULL) {
+                if(created >= 2U) {
+                    s_list_apply_pending = 1U;
+                    return;
+                }
                 btn = lv_btn_create(s_list_wifi);
                 lv_obj_set_width(btn, LV_PCT(100));
                 lv_obj_set_height(btn, 32);
@@ -491,13 +454,14 @@ static void ui_wifi_refresh_list(void)
 
                 s_ap_btns[i] = btn;
                 s_ap_lbls[i] = lbl;
+                created++;
             }
             snprintf(buf, sizeof(buf), "%s  (%d dBm)", s_aps[i].ssid, (int)s_aps[i].rssi);
             if(s_ap_lbls[i]) {
                 lv_label_set_text(s_ap_lbls[i], buf);
             }
             lv_obj_clear_flag(s_ap_btns[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
+        } else if(s_ap_btns[i] != NULL) {
             lv_obj_add_flag(s_ap_btns[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
@@ -541,12 +505,6 @@ static void ui_wifi_show_list_view(void)
     }
     if(s_lbl_wifi_status) {
         lv_obj_clear_flag(s_lbl_wifi_status, LV_OBJ_FLAG_HIDDEN);
-    }
-    if(s_lbl_wifi_dbg) {
-        lv_obj_clear_flag(s_lbl_wifi_dbg, LV_OBJ_FLAG_HIDDEN);
-    }
-    if(s_lbl_wifi_dbg2) {
-        lv_obj_add_flag(s_lbl_wifi_dbg2, LV_OBJ_FLAG_HIDDEN);
     }
     if(s_btn_rescan) {
         lv_obj_clear_flag(s_btn_rescan, LV_OBJ_FLAG_HIDDEN);
@@ -628,12 +586,6 @@ static void ui_wifi_show_pass_view(const char *ssid)
     }
     if(s_lbl_wifi_status) {
         lv_obj_add_flag(s_lbl_wifi_status, LV_OBJ_FLAG_HIDDEN);
-    }
-    if(s_lbl_wifi_dbg) {
-        lv_obj_add_flag(s_lbl_wifi_dbg, LV_OBJ_FLAG_HIDDEN);
-    }
-    if(s_lbl_wifi_dbg2) {
-        lv_obj_add_flag(s_lbl_wifi_dbg2, LV_OBJ_FLAG_HIDDEN);
     }
     if(s_btn_rescan) {
         lv_obj_add_flag(s_btn_rescan, LV_OBJ_FLAG_HIDDEN);
@@ -751,6 +703,7 @@ void UI_WiFi_Release(void)
 {
     s_wifi_active = 0;
     s_wifi_scan_active = 0U;
+    s_wifi_boot_pending = 0U;
     ui_wifi_destroy_ui();
 }
 
@@ -758,6 +711,7 @@ void UI_WiFi_Leave(void)
 {
     s_wifi_active = 0;
     s_wifi_scan_active = 0U;
+    s_wifi_boot_pending = 0U;
     ui_wifi_hide_pass_panel();
     s_wifi_view = UI_WIFI_VIEW_LIST;
 }
@@ -865,46 +819,64 @@ uint8_t UI_WiFi_IsPassView(void)
     return (s_wifi_active && s_wifi_view == UI_WIFI_VIEW_PASS) ? 1U : 0U;
 }
 
+static void ui_wifi_deferred_boot_async(void * user_data)
+{
+    (void)user_data;
+    if(!s_wifi_active || s_wifi_view != UI_WIFI_VIEW_LIST || Measure_IsActive()) {
+        return;
+    }
+    WWDG_SetCounter(0);
+    if(HostLink_TakeWifiStatus(s_wifi_line_buf, sizeof(s_wifi_line_buf))) {
+        ui_wifi_parse_status(s_wifi_line_buf);
+    }
+    /* 进页只问状态。已连接则不立刻扫网；未连接由 UpdateDebug 超时后再扫 */
+    HostLink_CmdWifiStatus();
+    if(s_wifi_connected) {
+        s_wifi_boot_pending = 0U;
+        if(s_ap_count > 0U) {
+            ui_wifi_refresh_list();
+        }
+    }
+}
+
 void UI_WiFi_Open(void)
 {
-    /* 释放其它副屏；首页常驻。进密码页时仍会 destroy AP 按钮腾堆 */
     UI_ReleaseSecondaryScreens();
     if(!ui_wifi_ensure_ui() || s_scr_wifi == NULL) {
         UI_ShowHome();
         return;
     }
+    PowerMgr_OnUserActivity();
+    s_wifi_active = 1;
+    s_return_scr = NULL;
+    lv_scr_load(s_scr_wifi);
+    /* 与档案页相同：切屏后立刻卸首页，避免两屏同时占满 56KB LVGL 堆 */
+    UI_UnloadHomeScreen();
+    ui_wifi_show_list_view();
+
     if(Measure_IsActive()) {
         if(s_lbl_wifi_block) {
             lv_obj_clear_flag(s_lbl_wifi_block, LV_OBJ_FLAG_HIDDEN);
         }
-        s_wifi_active = 1;
-        s_return_scr = NULL;
-        lv_scr_load(s_scr_wifi);
+        s_wifi_boot_pending = 0U;
         return;
     }
     if(s_lbl_wifi_block) {
         lv_obj_add_flag(s_lbl_wifi_block, LV_OBJ_FLAG_HIDDEN);
     }
-    PowerMgr_OnUserActivity();
-    s_wifi_active = 1;
-    ui_wifi_show_list_view();
-    lv_scr_load(s_scr_wifi);
-    if(s_ap_count > 0U) {
-        ui_wifi_refresh_list();
-        if(s_wifi_connected) {
-            s_wifi_conn_phase = UI_WIFI_CONN_CONNECTED;
-            HostLink_CmdWifiStatus();
-        } else {
-            ui_wifi_set_idle_hint();
-        }
+    s_wifi_boot_pending = 1U;
+    s_wifi_open_tick = TMOS_GetSystemClock();
+    if(s_wifi_connected && s_wifi_ssid[0] != '\0') {
+        char buf[96];
+        snprintf(buf, sizeof(buf), UI_STR_WIFI_CONNECTED_FMT, s_wifi_ssid, "");
+        ui_wifi_set_status_text(buf);
     } else {
         ui_wifi_set_status_text(UI_STR_WIFI_SCANNING);
-        ui_wifi_request_scan(1U);
     }
-    if(HostLink_TakeWifiList(s_wifi_line_buf, sizeof(s_wifi_line_buf))) {
-        ui_wifi_parse_list(s_wifi_line_buf);
+    /* 状态查询放到下一拍，避免与建页、卸首页挤在同一调用栈 */
+    if(lv_async_call(ui_wifi_deferred_boot_async, NULL) != LV_RES_OK) {
+        ui_wifi_deferred_boot_async(NULL);
     }
-    UI_WiFi_ApplyPending();
 }
 
 void UI_WiFi_UpdateDebug(void)
@@ -920,6 +892,19 @@ void UI_WiFi_UpdateDebug(void)
     }
     if(HostLink_TakeWifiList(s_wifi_line_buf, sizeof(s_wifi_line_buf))) {
         ui_wifi_parse_list(s_wifi_line_buf);
+    }
+    if(s_wifi_boot_pending) {
+        now = TMOS_GetSystemClock();
+        if(s_wifi_connected) {
+            s_wifi_boot_pending = 0U;
+        } else if(s_wifi_open_tick != 0U &&
+                  (now - s_wifi_open_tick) > MS1_TO_SYSTEM_TIME(800U)) {
+            s_wifi_boot_pending = 0U;
+            if(s_ap_count == 0U && s_wifi_conn_phase == UI_WIFI_CONN_IDLE) {
+                ui_wifi_set_status_text(UI_STR_WIFI_SCANNING);
+                ui_wifi_request_scan(1U);
+            }
+        }
     }
     if(s_wifi_conn_phase == UI_WIFI_CONN_PENDING) {
         now = TMOS_GetSystemClock();
@@ -954,9 +939,6 @@ void UI_WiFi_UpdateDebug(void)
             ui_wifi_request_scan(1U);
         }
     }
-    if(s_wifi_active && s_wifi_view == UI_WIFI_VIEW_LIST) {
-        ui_wifi_update_debug_label();
-    }
 }
 
 
@@ -971,8 +953,6 @@ static void ui_wifi_clear_widget_ptrs(void)
     s_btn_manual = NULL;
     s_btn_forget = NULL;
     s_lbl_wifi_block = NULL;
-    s_lbl_wifi_dbg = NULL;
-    s_lbl_wifi_dbg2 = NULL;
     memset(s_ap_btns, 0, sizeof(s_ap_btns));
     memset(s_ap_lbls, 0, sizeof(s_ap_lbls));
     s_wifi_ui_ready = 0U;
@@ -1209,16 +1189,6 @@ static void ui_wifi_build_list_ui(void)
     lv_obj_set_width(s_lbl_wifi_status, LV_DISP_HOR_RES - 16);
     lv_obj_align(s_lbl_wifi_status, LV_ALIGN_TOP_MID, 0, 58);
     lv_obj_clear_flag(s_lbl_wifi_status, LV_OBJ_FLAG_CLICKABLE);
-
-    s_lbl_wifi_dbg = lv_label_create(s_scr_wifi);
-    lv_label_set_text(s_lbl_wifi_dbg, "B:0 L:0 W:0 S:0 AP:0");
-    lv_obj_set_style_text_color(s_lbl_wifi_dbg, lv_color_hex(0x546E7A), 0);
-    lv_obj_align(s_lbl_wifi_dbg, LV_ALIGN_TOP_RIGHT, -4, 74);
-    lv_obj_clear_flag(s_lbl_wifi_dbg, LV_OBJ_FLAG_CLICKABLE);
-
-    s_lbl_wifi_dbg2 = lv_label_create(s_scr_wifi);
-    lv_label_set_text(s_lbl_wifi_dbg2, "");
-    lv_obj_add_flag(s_lbl_wifi_dbg2, LV_OBJ_FLAG_HIDDEN);
 
     s_btn_rescan = lv_btn_create(s_scr_wifi);
     lv_obj_set_size(s_btn_rescan, 88, 28);
